@@ -8,9 +8,6 @@ version = "0.1.0"
 description = "MEGA account manager for multi-account storage management"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "megapy @ git+https://github.com/EdwinAlmendras/megapy.git",
-]
 
 [project.optional-dependencies]
 dev = [

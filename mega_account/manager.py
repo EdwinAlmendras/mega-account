@@ -120,6 +120,8 @@ class AccountManager:
         """
         Discover and load all accounts from sessions directory.
         
+        Also checks for legacy single session at ~/.config/mega/session.session
+        
         Args:
             refresh_space: Whether to query space info from MEGA
             
@@ -129,11 +131,17 @@ class AccountManager:
         # Find all session files
         session_files = list(self._sessions_dir.glob(self._session_pattern))
         
+        # Also check for legacy single session
+        legacy_session = Path.home() / ".config" / "mega" / "session.session"
+        if legacy_session.exists() and legacy_session not in session_files:
+            session_files.append(legacy_session)
+            logger.info(f"Found legacy session: {legacy_session}")
+        
         if not session_files:
             logger.info(f"No session files found in {self._sessions_dir}")
             return []
         
-        logger.info(f"Found {len(session_files)} session(s) in {self._sessions_dir}")
+        logger.info(f"Found {len(session_files)} session(s)")
         
         # Load each account
         for session_path in sorted(session_files):
