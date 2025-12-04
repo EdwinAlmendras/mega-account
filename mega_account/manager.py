@@ -449,6 +449,31 @@ class AccountManager:
             else:
                 raise NoAccountsError("No accounts configured.")
         
+        # Check if all accounts have less than 1GB free
+        MIN_FREE_SPACE_GB = 1
+        MIN_FREE_SPACE_BYTES = MIN_FREE_SPACE_GB * 1024 * 1024 * 1024
+        
+        all_accounts_low_space = all(
+            a.space_free < MIN_FREE_SPACE_BYTES 
+            for a in self.active_accounts
+        ) if self.active_accounts else False
+        
+        # If all accounts have less than 1GB, create a new one automatically
+        if all_accounts_low_space and self._auto_create and prompt_new:
+            print(f"\n⚠️  All accounts have less than {MIN_FREE_SPACE_GB}GB free space.")
+            print("   Creating a new MEGA account automatically...")
+            try:
+                account = await self.create_new_session()
+                self._current_account = account.name
+                # Refresh to get accurate space info
+                await self._refresh_account(account)
+                # Check if new account has space
+                if account.has_space_for(file_size, self._buffer_mb):
+                    return await self._get_or_create_client(account)
+            except Exception as e:
+                print(f"   Failed to create new account: {e}")
+                # Continue to normal flow
+        
         account = self.get_best_account(file_size)
         
         if not account:
