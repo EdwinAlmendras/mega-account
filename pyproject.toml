@@ -8,6 +8,12 @@ version = "0.1.0"
 description = "MEGA account manager for multi-account storage management"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.9.0",
+]
+
+[project.scripts]
+mega-account = "mega_account.cli:main"
 
 [project.optional-dependencies]
 dev = [

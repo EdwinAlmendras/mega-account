@@ -344,6 +344,59 @@ class AccountManager:
         
         return results
     
+    async def find_by_mega_id(self, mega_id: str) -> Optional[tuple]:
+        """
+        Find a file by mega_id (attribute 'm') across ALL accounts.
+        
+        Searches recursively through all nodes in all accounts.
+        
+        Args:
+            mega_id: Source ID (mega_id stored as 'm' attribute)
+            
+        Returns:
+            Tuple of (account, node) if found, None otherwise
+        """
+        if not self._accounts:
+            await self.load_accounts(refresh_space=False)
+        
+        def search_nodes(node, account_name: str):
+            """Recursively search for node with mega_id."""
+            if not node:
+                return None
+            
+            # Check if this node has the mega_id
+            if node.attributes and node.attributes.mega_id == mega_id:
+                return (account_name, node)
+            
+            # If it's a folder, search children
+            if node.is_folder:
+                for child in node.children:
+                    result = search_nodes(child, account_name)
+                    if result:
+                        return result
+            
+            return None
+        
+        # Search in all active accounts
+        for account in self.active_accounts:
+            try:
+                client = await self._get_or_create_client(account)
+                
+                # Ensure nodes are loaded
+                if client._node_service is None:
+                    await client._load_nodes()
+                
+                # Start from root
+                root = await client.get_root()
+                result = search_nodes(root, account.name)
+                if result:
+                    return result
+            except Exception as e:
+                logger.debug(f"Error searching in account {account.name} for mega_id {mega_id}: {e}")
+                continue
+        
+        return None
+    
     async def create_new_session(
         self,
         name: Optional[str] = None,
