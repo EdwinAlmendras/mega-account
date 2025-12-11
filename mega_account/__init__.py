@@ -31,6 +31,7 @@ Session Discovery:
 """
 from .manager import AccountManager
 from .models import ManagedAccount, AccountSelection, UploadPlan
+from .api_client import AccountAPIClient
 from .exceptions import (
     MegaAccountError,
     NoAccountsError,
@@ -45,6 +46,7 @@ __version__ = "0.1.0"
 __all__ = [
     # Main
     "AccountManager",
+    "AccountAPIClient",
     # Models
     "ManagedAccount",
     "AccountSelection", 

@@ -31,17 +31,36 @@ async with AccountManager() as manager:
 
 ## Session Files
 
-By default, looks for `*.session` files in `~/.config/mega/`:
+By default, looks for `*.session` files in `~/.config/mega/sessions/`:
 
 ```
-~/.config/mega/
-├── session.session      # Primary account
-├── session2.session     # Secondary account
-├── backup.session       # Backup account
+~/.config/mega/sessions/
+├── md5(email1).session  # Account 1 (email hash)
+├── md5(email2).session  # Account 2 (email hash)
 └── ...
 ```
 
+Session files are named using `md5(email).session` format.
+
 ## Usage
+
+### Import Accounts from API
+
+Import all accounts from `mega-account-api`:
+
+```bash
+mega-account import --api-url http://127.0.0.1:8000
+```
+
+This will:
+1. Fetch all accounts from the API (with encrypted passwords)
+2. Prompt for master password to decrypt
+3. Login to each account
+4. Save session files as `md5(email).session`
+
+**Options:**
+- `--api-url` / `-u`: API server URL (default: http://127.0.0.1:8000)
+- `--master-password` / `-p`: Master password (prompted if not provided)
 
 ### Basic Upload with Auto-Selection
 
@@ -102,13 +121,27 @@ async with AccountManager() as manager:
     # Total free: 165.7 GB
 ```
 
+### Import from API (Programmatic)
+
+```python
+from mega_account import AccountManager
+
+async with AccountManager() as manager:
+    # Import all accounts from API
+    accounts = await manager.import_from_api(
+        api_url="http://127.0.0.1:8000",
+        master_password="your_master_password"  # Optional, will prompt if not provided
+    )
+    print(f"Imported {len(accounts)} accounts")
+```
+
 ### Custom Config Directory
 
 ```python
 from pathlib import Path
 
 manager = AccountManager(
-    config_dir=Path("/custom/path"),
+    sessions_dir=Path("/custom/path"),
     session_pattern="mega_*.session",  # Custom pattern
     buffer_mb=500  # Keep 500MB buffer free
 )

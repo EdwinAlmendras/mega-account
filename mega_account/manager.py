@@ -10,15 +10,18 @@ Features:
 - Upload planning across multiple accounts
 """
 import asyncio
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Callable, Any
 from datetime import datetime, timedelta
 import logging
 import getpass
+import hashlib
 
 from megapy import MegaClient, AccountInfo
 
 from .models import ManagedAccount, AccountSelection, UploadPlan
+from .api_client import AccountAPIClient
 from .exceptions import (
     NoAccountsError,
     NoSpaceError,
@@ -28,6 +31,9 @@ from .exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Proxy configuration - read from environment variable
+PROXY_URL = os.getenv("MEGA_PROXY_URL")
 
 
 class AccountManager:
@@ -68,7 +74,8 @@ class AccountManager:
         sessions_dir: Optional[Path] = None,
         session_pattern: str = "*.session",
         buffer_mb: int = 100,
-        auto_create: bool = True
+        auto_create: bool = True,
+        auto_load: bool = True
     ):
         """
         Initialize account manager.
@@ -78,11 +85,13 @@ class AccountManager:
             session_pattern: Glob pattern for session files
             buffer_mb: Buffer space to keep free (MB)
             auto_create: Auto-create new session if all accounts are full
+            auto_load: Automatically load all accounts in __aenter__ (default: True)
         """
         self._sessions_dir = Path(sessions_dir) if sessions_dir else self.DEFAULT_SESSIONS_DIR
         self._session_pattern = session_pattern
         self._buffer_mb = buffer_mb
         self._auto_create = auto_create
+        self._auto_load = auto_load
         
         self._accounts: Dict[str, ManagedAccount] = {}
         self._clients: Dict[str, MegaClient] = {}
@@ -130,12 +139,6 @@ class AccountManager:
         """
         # Find all session files
         session_files = list(self._sessions_dir.glob(self._session_pattern))
-        
-        # Also check for legacy single session
-        legacy_session = Path.home() / ".config" / "mega" / "session.session"
-        if legacy_session.exists() and legacy_session not in session_files:
-            session_files.append(legacy_session)
-            logger.info(f"Found legacy session: {legacy_session}")
         
         if not session_files:
             logger.info(f"No session files found in {self._sessions_dir}")
@@ -194,8 +197,10 @@ class AccountManager:
     
     async def refresh_all(self) -> None:
         """Refresh space info for all accounts."""
-        tasks = [self._refresh_account(a) for a in self._accounts.values()]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for account in self._accounts.values():
+            logger.info(f"Refreshing space info for account: {account.name}")
+            await self._refresh_account(account)
+            logger.info(f"Refreshed space info for account: {account.name}")
     
     async def _refresh_account(self, account: ManagedAccount) -> None:
         """Refresh space info for a single account."""
@@ -218,7 +223,8 @@ class AccountManager:
     async def _get_or_create_client(self, account: ManagedAccount) -> MegaClient:
         """Get or create a MegaClient for an account."""
         if account.name not in self._clients:
-            client = MegaClient(str(account.session_path))
+            config = MegaClient.create_config(proxy=PROXY_URL)
+            client = MegaClient(str(account.session_path), config=config)
             await client.start()
             self._clients[account.name] = client
         
@@ -407,17 +413,22 @@ class AccountManager:
         Create a new session interactively or with provided credentials.
         
         Args:
-            name: Session name (auto-generated if not provided)
+            name: Session name (auto-generated from email MD5 if not provided)
             email: MEGA email (prompted if not provided)
             password: MEGA password (prompted if not provided)
             
         Returns:
             New ManagedAccount
         """
-        # Generate session name if not provided
+        # Get credentials interactively if not provided
+        if not email:
+            print("\n📧 New MEGA account login required")
+            email = input("  Email: ").strip()
+        
+        # Generate session name from email MD5 if not provided
         if not name:
-            existing = len(list(self._sessions_dir.glob("*.session")))
-            name = f"account{existing + 1}"
+            email_hash = hashlib.md5(email.lower().encode()).hexdigest()
+            name = email_hash
         
         session_path = self._sessions_dir / f"{name}.session"
         
@@ -426,18 +437,14 @@ class AccountManager:
             logger.warning(f"Session {name} already exists, loading it")
             return await self.add_account(session_path, name)
         
-        # Get credentials interactively if not provided
-        if not email:
-            print("\n📧 New MEGA account login required")
-            email = input("  Email: ").strip()
-        
         if not password:
             password = getpass.getpass("  Password: ")
         
-        # Create client and login
+        # Create client and login with proxy
         print(f"  Logging in as {email}...")
         
-        client = MegaClient(str(session_path))
+        config = MegaClient.create_config(proxy=PROXY_URL)
+        client = MegaClient(str(session_path), config=config)
         try:
             await client.start(email=email, password=password)
             
@@ -658,12 +665,352 @@ class AccountManager:
     
     async def __aenter__(self) -> 'AccountManager':
         """Async context manager entry."""
-        await self.load_accounts()
+        if self._auto_load:
+            await self.load_accounts()
         return self
     
     async def __aexit__(self, *args) -> None:
         """Async context manager exit."""
         await self.close()
+    
+    async def import_from_api(
+        self,
+        api_url: str = "http://127.0.0.1:8000",
+        master_password: Optional[str] = None
+    ) -> List[ManagedAccount]:
+        """
+        Import all accounts from API, decrypt passwords, login and save sessions.
+        
+        This method:
+        1. Gets all accounts from API (with encrypted passwords)
+        2. Decrypts passwords using master password
+        3. Logs in to each account
+        4. Saves session files (md5(email).session)
+        
+        Args:
+            api_url: API server URL
+            master_password: Master password for decryption (prompted if not provided)
+            
+        Returns:
+            List of imported ManagedAccount instances
+        """
+        # Import crypto module (local)
+        from .crypto import PasswordCrypto
+        
+        # Get master password if not provided
+        if not master_password:
+            print("\n🔐 Master password required to decrypt accounts")
+            master_password = getpass.getpass("Master password: ")
+            if not master_password:
+                raise ValueError("Master password is required")
+        
+        # Initialize crypto
+        crypto = PasswordCrypto(master_password)
+        
+        # Get all accounts from API
+        print(f"\n📡 Fetching accounts from API: {api_url}")
+        async with AccountAPIClient(api_url=api_url) as api:
+            try:
+                accounts_data = await api.get_all_accounts()
+            except Exception as e:
+                logger.error(f"Failed to fetch accounts from API: {e}")
+                raise AccountConnectionError("API", e)
+        
+        if not accounts_data:
+            print("  No accounts found in API")
+            return []
+        
+        print(f"  Found {len(accounts_data)} account(s)")
+        
+        imported_accounts = []
+        failed_accounts = []
+        
+        # Process each account
+        for acc_data in accounts_data:
+            email = acc_data['email']
+            encrypted_password = acc_data['password']
+            
+            try:
+                # Decrypt password
+                password = crypto.decrypt_password(encrypted_password)
+                
+                # Create session (md5(email).session)
+                email_hash = hashlib.md5(email.lower().encode()).hexdigest()
+                session_path = self._sessions_dir / f"{email_hash}.session"
+                
+                # Check if session already exists
+                if session_path.exists():
+                    logger.info(f"Session already exists for {email}, skipping login")
+                    # Load existing account
+                    account = await self.add_account(session_path, email_hash)
+                    imported_accounts.append(account)
+                    continue
+                
+                # Login and create session with proxy
+                print(f"  Logging in {email}...")
+                config = MegaClient.create_config(proxy=PROXY_URL)
+                client = MegaClient(str(session_path), config=config)
+                try:
+                    await client.start(email=email, password=password)
+                    
+                    # Get account info
+                    info = await client.get_account_info()
+                    
+                    # Create managed account
+                    account = ManagedAccount(
+                        session_path=session_path,
+                        name=email_hash,
+                        space_free=info.space_free,
+                        space_total=info.space_total,
+                        space_used=info.space_used,
+                        last_checked=datetime.now(),
+                        is_active=True,
+                        priority=len(self._accounts)
+                    )
+                    
+                    self._accounts[account.name] = account
+                    self._clients[account.name] = client
+                    
+                    imported_accounts.append(account)
+                    print(f"    ✓ {email}: {account.space_free_gb:.1f} GB free")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to login {email}: {e}")
+                    failed_accounts.append((email, str(e)))
+                    # Cleanup failed session
+                    if session_path.exists():
+                        session_path.unlink()
+                    
+            except Exception as e:
+                logger.error(f"Failed to decrypt password for {email}: {e}")
+                failed_accounts.append((email, f"Decryption error: {e}"))
+        
+        # Summary
+        print(f"\n✓ Imported {len(imported_accounts)} account(s)")
+        if failed_accounts:
+            print(f"✗ Failed to import {len(failed_accounts)} account(s):")
+            for email, error in failed_accounts:
+                print(f"  - {email}: {error}")
+        
+        return imported_accounts
+    
+    async def merge(
+        self,
+        source_account_name: Optional[str] = None,
+        target_account_name: Optional[str] = None,
+        imports_folder_name: str = "imports"
+    ) -> Dict[str, Any]:
+        """
+        Automatically merge all content from account with less space (more full) to account with more space (less full).
+        
+        Process:
+        1. Identifies source account (less free space = more content) and target account (more free space = less content)
+        2. In source account:
+           - Creates "imports" folder (or uses existing)
+           - Merges all children from root to imports folder
+           - Shares the imports folder to get a link
+        3. In target account:
+           - Imports the shared link into root
+        
+        Args:
+            source_account_name: Optional source account name. If not provided, uses account with least free space (most full).
+            target_account_name: Optional target account name. If not provided, uses account with most free space (least full).
+            imports_folder_name: Name of the imports folder to create (default: "imports")
+            
+        Returns:
+            Dict with:
+                - source_account: Source account name
+                - target_account: Target account name
+                - imports_folder: Name of imports folder
+                - shared_link: The shared link URL
+                - merged_count: Number of items merged
+                - success: Whether the operation succeeded
+        """
+        logger.info("=== Starting merge ===")
+        
+        # If both account names are provided, only load those two accounts
+        # Otherwise, load all accounts for auto-selection
+        if source_account_name and target_account_name:
+            logger.info(f"Loading only specified accounts: {source_account_name} -> {target_account_name}")
+            
+            # Build session paths for the two accounts
+            source_session_path = self._sessions_dir / f"{source_account_name}.session"
+            target_session_path = self._sessions_dir / f"{target_account_name}.session"
+            
+            # Check if session files exist
+            if not source_session_path.exists():
+                raise FileNotFoundError(f"Source session file not found: {source_session_path}")
+            if not target_session_path.exists():
+                raise FileNotFoundError(f"Target session file not found: {target_session_path}")
+            
+            # Only load/add these two accounts
+            if source_account_name not in self._accounts:
+                await self.add_account(source_session_path, source_account_name)
+            if target_account_name not in self._accounts:
+                await self.add_account(target_session_path, target_account_name)
+            
+            source_account = self._accounts[source_account_name]
+            target_account = self._accounts[target_account_name]
+            
+            logger.info(f"Loaded 2 accounts: {source_account_name} and {target_account_name}")
+        else:
+            # Auto-selection mode: load all accounts
+            logger.info("Loading/refreshing all accounts for auto-selection...")
+            if not self._accounts:
+                await self.load_accounts()
+            else:
+                await self.refresh_all()
+            logger.info(f"Accounts loaded: {len(self._accounts)} total, {len(self.active_accounts)} active")
+            
+            if len(self.active_accounts) < 2:
+                raise ValueError("Need at least 2 active accounts to perform merge")
+            
+            # Determine source and target accounts
+            if source_account_name:
+                if source_account_name not in self._accounts:
+                    raise KeyError(f"Source account not found: {source_account_name}")
+                source_account = self._accounts[source_account_name]
+            else:
+                # Use account with least free space (most full, has more content to move)
+                source_account = min(self.active_accounts, key=lambda a: a.space_free)
+            
+            if target_account_name:
+                if target_account_name not in self._accounts:
+                    raise KeyError(f"Target account not found: {target_account_name}")
+                target_account = self._accounts[target_account_name]
+            else:
+                # Use account with most free space (least full, has room for content)
+                candidates = [a for a in self.active_accounts if a.name != source_account.name]
+                if not candidates:
+                    raise ValueError("Cannot use same account as source and target")
+                target_account = max(candidates, key=lambda a: a.space_free)
+        
+        # Ensure source and target are different
+        if source_account.name == target_account.name:
+            raise ValueError("Source and target accounts must be different")
+        
+        logger.info(
+            f"Merging from {source_account.name} ({source_account.space_free_gb:.1f} GB free) "
+            f"to {target_account.name} ({target_account.space_free_gb:.1f} GB free)"
+        )
+        
+        # Get clients
+        logger.info(f"Getting client for source account: {source_account.name}")
+        source_client = await self._get_or_create_client(source_account)
+        logger.info(f"Source client obtained")
+        
+        logger.info(f"Getting client for target account: {target_account.name}")
+        target_client = await self._get_or_create_client(target_account)
+        logger.info(f"Target client obtained")
+        
+        try:
+            # Step 1: Get root in source account and ensure nodes are loaded
+            logger.info("Getting root and loading nodes in source account...")
+            
+            # Ensure nodes are loaded first
+            if source_client._node_service is None:
+                logger.info("Loading nodes in source account...")
+                await source_client._load_nodes()
+            
+            # Get root (this should use the loaded nodes)
+            source_root = await source_client.get_root(refresh=True)
+            logger.info(f"Source root obtained, loading children...")
+            
+            # Ensure children are loaded
+            if not hasattr(source_root, 'children') or len(source_root.children) == 0:
+                logger.info("Root has no children or children not loaded, refreshing...")
+                # Try to load children explicitly
+                await source_client._load_nodes()
+                source_root = await source_client.get_root(refresh=True)
+            
+            logger.info(f"Source root has {len(source_root.children)} children")
+            
+            # Step 2: Create or get imports folder
+            imports_folder = None
+            # Check if imports folder already exists
+            logger.info("Checking for existing imports folder...")
+            for child in source_root.children:
+                if child.is_folder and child.name == imports_folder_name:
+                    imports_folder = child
+                    logger.info(f"Found existing imports folder: {imports_folder_name}")
+                    break
+            
+            if not imports_folder:
+                logger.info(f"Creating imports folder: {imports_folder_name}")
+                imports_folder = await source_client.create_folder(imports_folder_name, parent=source_root)
+            
+            # Step 3: Move all children from root to imports folder
+            # Get all children (make a copy of the list since we'll be modifying it)
+            logger.info("Getting list of children to move...")
+            root_children = list(source_root.children)
+            logger.info(f"Found {len(root_children)} total children in root")
+            
+            # Filter out the imports folder itself
+            children_to_move = [child for child in root_children if child.handle != imports_folder.handle]
+            logger.info(f"Will move {len(children_to_move)} children (excluding imports folder)")
+            
+            if len(children_to_move) == 0:
+                logger.info("No children to move, skipping move step")
+                moved_count = 0
+            else:
+                moved_count = 0
+                for i, child in enumerate(children_to_move, 1):
+                    try:
+                        logger.info(f"Moving {i}/{len(children_to_move)}: {child.name} to {imports_folder_name}")
+                        await source_client.move(child, imports_folder)
+                        moved_count += 1
+                        logger.debug(f"Successfully moved {child.name}")
+                    except Exception as e:
+                        logger.error(f"Failed to move {child.name}: {e}", exc_info=True)
+                        # Continue with other children
+                
+                logger.info(f"Moved {moved_count}/{len(children_to_move)} items to {imports_folder_name}")
+            
+            # Step 4: Share the imports folder
+            logger.info("Sharing imports folder...")
+            shared_link = await imports_folder.share_folder()
+            logger.info(f"Shared link: {shared_link}")
+            
+            # Step 5: Import the link in target account
+            logger.info(f"Importing link into {target_account.name}...")
+            target_root = await target_client.get_root()
+            
+            # Ensure nodes are loaded in target account
+            if target_client._node_service is None:
+                logger.info("Loading nodes in target account...")
+                await target_client._load_nodes()
+            
+            # Import the link
+            logger.info(f"Importing shared link: {shared_link}")
+            imported = await target_root.import_link(shared_link, clear_attributes=True)
+            logger.info(f"Successfully imported {len(imported)} items into target account")
+            
+            # Refresh space info for both accounts
+            await self._refresh_account(source_account)
+            await self._refresh_account(target_account)
+            
+            return {
+                "source_account": source_account.name,
+                "target_account": target_account.name,
+                "imports_folder": imports_folder_name,
+                "shared_link": shared_link,
+                "moved_count": moved_count,
+                "imported_count": len(imported),
+                "success": True
+            }
+            
+        except Exception as e:
+            logger.error(f"Auto-move failed: {e}", exc_info=True)
+            return {
+                "source_account": source_account.name,
+                "target_account": target_account.name,
+                "imports_folder": imports_folder_name,
+                "shared_link": None,
+                "moved_count": moved_count if 'moved_count' in locals() else 0,
+                "imported_count": 0,
+                "success": False,
+                "error": str(e)
+            }
     
     def __str__(self) -> str:
         lines = [f"AccountManager ({len(self._accounts)} accounts):"]
