@@ -75,17 +75,21 @@ class AccountManager:
         session_pattern: str = "*.session",
         buffer_mb: int = 100,
         auto_create: bool = True,
-        auto_load: bool = True
+        auto_load: bool = True,
+        session_paths: Optional[List[Path]] = None
     ):
         """
         Initialize account manager.
         
         Args:
             sessions_dir: Directory containing session files (default: ~/.config/mega/sessions/)
-            session_pattern: Glob pattern for session files
+                         Only used if session_paths is not provided.
+            session_pattern: Glob pattern for session files (only used if session_paths is None)
             buffer_mb: Buffer space to keep free (MB)
             auto_create: Auto-create new session if all accounts are full
             auto_load: Automatically load all accounts in __aenter__ (default: True)
+            session_paths: Optional list of specific session file paths to load.
+                          If provided, only these sessions will be loaded (sessions_dir is ignored).
         """
         if not sessions_dir:
             sessions_dir = os.getenv("MEGA_SESSIONS_DIR")
@@ -95,13 +99,13 @@ class AccountManager:
                 sessions_dir = self.DEFAULT_SESSIONS_DIR
             if not sessions_dir.exists():
                 sessions_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Sessions directory: {sessions_dir}")
         
         self._sessions_dir = Path(sessions_dir)
         self._session_pattern = session_pattern
         self._buffer_mb = buffer_mb
         self._auto_create = auto_create
         self._auto_load = auto_load
+        self._session_paths = session_paths  # Store for use in load_accounts
         
         self._accounts: Dict[str, ManagedAccount] = {}
         self._clients: Dict[str, MegaClient] = {}
@@ -109,6 +113,56 @@ class AccountManager:
         
         # Ensure sessions directory exists
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        
+        if session_paths:
+            logger.info(f"AccountManager initialized with {len(session_paths)} specific session path(s)")
+        else:
+            logger.info(f"Sessions directory: {sessions_dir}")
+    
+    @classmethod
+    def from_session_paths(
+        cls,
+        session_paths: List[Path],
+        buffer_mb: int = 100,
+        auto_create: bool = True,
+        auto_load: bool = True
+    ) -> 'AccountManager':
+        """
+        Create AccountManager from a list of specific session file paths.
+        
+        This is useful when you want to load only specific sessions (e.g., from a collection)
+        instead of all sessions in a directory.
+        
+        Args:
+            session_paths: List of paths to session files
+            buffer_mb: Buffer space to keep free (MB)
+            auto_create: Auto-create new session if all accounts are full
+            auto_load: Automatically load all accounts in __aenter__ (default: True)
+            
+        Returns:
+            AccountManager instance configured to load only the specified sessions
+            
+        Example:
+            >>> session_paths = [
+            ...     Path("/path/to/session1.session"),
+            ...     Path("/path/to/session2.session")
+            ... ]
+            >>> manager = AccountManager.from_session_paths(session_paths)
+            >>> async with manager:
+            ...     # Only session1 and session2 will be loaded
+            ...     pass
+        """
+        # Use the first session's parent directory as sessions_dir (for compatibility)
+        sessions_dir = session_paths[0].parent if session_paths else cls.DEFAULT_SESSIONS_DIR
+        
+        manager = cls(
+            sessions_dir=sessions_dir,
+            buffer_mb=buffer_mb,
+            auto_create=auto_create,
+            auto_load=auto_load,
+            session_paths=session_paths
+        )
+        return manager
     
     @property
     def accounts(self) -> List[ManagedAccount]:
@@ -141,20 +195,27 @@ class AccountManager:
         
         Also checks for legacy single session at ~/.config/mega/session.session
         
+        If session_paths was provided in __init__, only loads those specific sessions.
+        Otherwise, scans sessions_dir for all matching session files.
+        
         Args:
             refresh_space: Whether to query space info from MEGA
             
         Returns:
             List of discovered accounts
         """
-        # Find all session files
-        session_files = list(self._sessions_dir.glob(self._session_pattern))
+        # If specific session paths were provided, use those
+        if self._session_paths:
+            session_files = [Path(p) for p in self._session_paths if Path(p).exists()]
+            logger.info(f"Loading {len(session_files)} specified session(s) from session_paths")
+        else:
+            # Find all session files in directory
+            session_files = list(self._sessions_dir.glob(self._session_pattern))
+            logger.info(f"Found {len(session_files)} session(s) in {self._sessions_dir}")
         
         if not session_files:
-            logger.info(f"No session files found in {self._sessions_dir}")
+            logger.info(f"No session files found")
             return []
-        
-        logger.info(f"Found {len(session_files)} session(s)")
         
         # Load each account
         for session_path in sorted(session_files):
