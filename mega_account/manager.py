@@ -87,7 +87,15 @@ class AccountManager:
             auto_create: Auto-create new session if all accounts are full
             auto_load: Automatically load all accounts in __aenter__ (default: True)
         """
-        self._sessions_dir = Path(sessions_dir) if sessions_dir else self.DEFAULT_SESSIONS_DIR
+        if not sessions_dir:
+            sessions_dir = os.getenv("MEGA_SESSIONS_DIR")
+            if not sessions_dir:
+                sessions_dir = self.DEFAULT_SESSIONS_DIR
+            if not sessions_dir.exists():
+                sessions_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Sessions directory: {sessions_dir}")
+        
+        self._sessions_dir = Path(sessions_dir)
         self._session_pattern = session_pattern
         self._buffer_mb = buffer_mb
         self._auto_create = auto_create
