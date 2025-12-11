@@ -89,6 +89,8 @@ class AccountManager:
         """
         if not sessions_dir:
             sessions_dir = os.getenv("MEGA_SESSIONS_DIR")
+            if sessions_dir:
+                sessions_dir = Path(sessions_dir)
             if not sessions_dir:
                 sessions_dir = self.DEFAULT_SESSIONS_DIR
             if not sessions_dir.exists():
