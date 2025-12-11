@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class AccountAPIClient:
     """Client for communicating with mega-account-api."""
     
-    def __init__(self, api_url: str = "http://127.0.0.1:8000"):
+    def __init__(self, api_url: str = "http://127.0.0.1:9932"):
         """
         Initialize API client.
         
@@ -109,15 +109,31 @@ class AccountAPIClient:
             logger.error(f"API error getting account: {e}")
             raise
     
-    async def get_all_accounts(self) -> List[dict]:
+    async def get_all_accounts(
+        self,
+        collection_name: Optional[str] = None,
+        collection_id: Optional[int] = None
+    ) -> List[dict]:
         """
         Get all accounts with encrypted passwords.
         
+        If collection_name or collection_id is provided, returns only accounts in that collection.
+        
+        Args:
+            collection_name: Optional collection name to filter accounts
+            collection_id: Optional collection ID to filter accounts
+            
         Returns:
             List of account dicts with encrypted passwords
         """
+        params = {}
+        if collection_name:
+            params["collection_name"] = collection_name
+        if collection_id:
+            params["collection_id"] = collection_id
+        
         try:
-            response = await self.client.get("/get_all")
+            response = await self.client.get("/get_all", params=params)
             response.raise_for_status()
             data = response.json()
             return data.get("accounts", [])

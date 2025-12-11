@@ -746,8 +746,10 @@ class AccountManager:
     
     async def import_from_api(
         self,
-        api_url: str = "http://127.0.0.1:8000",
-        master_password: Optional[str] = None
+        api_url: str = "http://127.0.0.1:9932",
+        master_password: Optional[str] = None,
+        collection_name: Optional[str] = None,
+        collection_id: Optional[int] = None
     ) -> List[ManagedAccount]:
         """
         Import all accounts from API, decrypt passwords, login and save sessions.
@@ -761,6 +763,8 @@ class AccountManager:
         Args:
             api_url: API server URL
             master_password: Master password for decryption (prompted if not provided)
+            collection_name: Optional collection name to import only accounts from that collection
+            collection_id: Optional collection ID to import only accounts from that collection
             
         Returns:
             List of imported ManagedAccount instances
@@ -779,10 +783,19 @@ class AccountManager:
         crypto = PasswordCrypto(master_password)
         
         # Get all accounts from API
-        print(f"\n📡 Fetching accounts from API: {api_url}")
+        collection_filter = ""
+        if collection_name:
+            collection_filter = f" (collection: {collection_name})"
+        elif collection_id:
+            collection_filter = f" (collection ID: {collection_id})"
+        
+        print(f"\n📡 Fetching accounts from API: {api_url}{collection_filter}")
         async with AccountAPIClient(api_url=api_url) as api:
             try:
-                accounts_data = await api.get_all_accounts()
+                accounts_data = await api.get_all_accounts(
+                    collection_name=collection_name,
+                    collection_id=collection_id
+                )
             except Exception as e:
                 logger.error(f"Failed to fetch accounts from API: {e}")
                 raise AccountConnectionError("API", e)
