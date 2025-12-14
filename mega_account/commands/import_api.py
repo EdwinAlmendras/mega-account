@@ -23,7 +23,7 @@ def import_from_api(
 
 async def _import_from_api(api_url: str, master_password: Optional[str], collection_name: Optional[str]):
     """Import accounts from API."""
-    async with AccountManager() as manager:
+    async with AccountManager(auto_load=False) as manager:
         try:
             accounts = await manager.import_from_api(
                 api_url=api_url,
